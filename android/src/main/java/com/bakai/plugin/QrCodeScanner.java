@@ -10,10 +10,12 @@ import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleOwner;
+import androidx.lifecycle.Observer;
 import com.google.mlkit.vision.barcode.*;
 import com.google.mlkit.vision.barcode.common.Barcode;
 import com.google.mlkit.vision.common.InputImage;
 import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -23,13 +25,23 @@ public class QrCodeScanner {
     private final BarcodeScanner scanner;
 
     private ExecutorService cameraExecutor;
+    private final Executor mainExecutor;
+
+    private ProcessCameraProvider provider;
     private Camera camera;
     private ImageAnalysis analysis;
+
     private boolean paused = false;
+
+    // zoom readiness + pending zoom
+    private volatile boolean zoomReady = false;
+    private volatile Float pendingZoomRatio = null;
 
     public interface Callback {
         void onBarcodes(List<Barcode> barcodes);
         void onError(String message);
+        // вызовем когда zoom state готов
+        void onZoomReady(float minRatio, float maxRatio, float currentRatio);
     }
 
     public QrCodeScanner(Context context) {
@@ -39,6 +51,7 @@ public class QrCodeScanner {
 
         scanner = BarcodeScanning.getClient(options);
         cameraExecutor = Executors.newSingleThreadExecutor();
+        mainExecutor = ContextCompat.getMainExecutor(context);
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -46,7 +59,7 @@ public class QrCodeScanner {
         ProcessCameraProvider.getInstance(context).addListener(
             () -> {
                 try {
-                    ProcessCameraProvider provider = ProcessCameraProvider.getInstance(context).get();
+                    provider = ProcessCameraProvider.getInstance(context).get();
 
                     Size targetSize;
                     switch (resolution) {
@@ -73,33 +86,85 @@ public class QrCodeScanner {
                         .build();
 
                     analysis.setAnalyzer(cameraExecutor, (image) -> {
-                        if (paused || image.getImage() == null) {
+                        try {
+                            if (paused || image.getImage() == null) {
+                                image.close();
+                                return;
+                            }
+
+                            InputImage inputImage = InputImage.fromMediaImage(image.getImage(), image.getImageInfo().getRotationDegrees());
+
+                            scanner
+                                .process(inputImage)
+                                .addOnSuccessListener(callback::onBarcodes)
+                                .addOnFailureListener((e) -> callback.onError(e.getMessage()))
+                                .addOnCompleteListener((t) -> image.close());
+                        } catch (Exception e) {
                             image.close();
-                            return;
+                            callback.onError(e.getMessage());
                         }
-
-                        InputImage inputImage = InputImage.fromMediaImage(image.getImage(), image.getImageInfo().getRotationDegrees());
-
-                        scanner
-                            .process(inputImage)
-                            .addOnSuccessListener(callback::onBarcodes)
-                            .addOnFailureListener((e) -> callback.onError(e.getMessage()))
-                            .addOnCompleteListener((t) -> image.close());
                     });
 
+                    // обязательно на main thread (мы уже в mainExecutor listener)
                     provider.unbindAll();
-
                     camera = provider.bindToLifecycle(owner, selector, preview, analysis);
+
+                    // дождаться zoom state
+                    observeZoomState(owner, callback);
                 } catch (Exception e) {
                     callback.onError(e.getMessage());
                 }
             },
-            ContextCompat.getMainExecutor(context)
+            mainExecutor
         );
+    }
+
+    private void observeZoomState(LifecycleOwner owner, Callback callback) {
+        if (camera == null) return;
+
+        camera
+            .getCameraInfo()
+            .getZoomState()
+            .observe(
+                owner,
+                new Observer<ZoomState>() {
+                    @Override
+                    public void onChanged(ZoomState zs) {
+                        if (zs == null) return;
+
+                        if (!zoomReady) {
+                            zoomReady = true;
+                            callback.onZoomReady(zs.getMinZoomRatio(), zs.getMaxZoomRatio(), zs.getZoomRatio());
+
+                            // применяем pending zoom, если уже просили
+                            if (pendingZoomRatio != null) {
+                                setZoomRatio(pendingZoomRatio);
+                                pendingZoomRatio = null;
+                            }
+                        }
+                    }
+                }
+            );
     }
 
     public void stop() {
         paused = true;
+
+        // CameraX unbind строго на main thread
+        mainExecutor.execute(() -> {
+            try {
+                if (provider != null) {
+                    provider.unbindAll();
+                }
+            } catch (Exception ignored) {}
+
+            provider = null;
+            camera = null;
+            analysis = null;
+            zoomReady = false;
+            pendingZoomRatio = null;
+        });
+
         if (cameraExecutor != null) {
             cameraExecutor.shutdown();
             cameraExecutor = null;
@@ -114,22 +179,14 @@ public class QrCodeScanner {
         paused = false;
     }
 
-    public void enableTorch(boolean enabled) {
-        if (camera != null) {
-            camera.getCameraControl().enableTorch(enabled);
-        }
-    }
-
-    public void setZoom(float ratio) {
-        if (camera != null) {
-            camera.getCameraControl().setZoomRatio(ratio);
-        }
-    }
-
-    /// ///
+    // ===== Torch =====
 
     public boolean isTorchAvailable() {
         return camera != null && camera.getCameraInfo().hasFlashUnit();
+    }
+
+    public boolean isZoomReady() {
+        return camera != null && camera.getCameraInfo().getZoomState().getValue() != null;
     }
 
     public boolean isTorchEnabled() {
@@ -138,22 +195,25 @@ public class QrCodeScanner {
         return state != null && state == TorchState.ON;
     }
 
+    public void enableTorch(boolean enabled) {
+        if (camera == null) return;
+        mainExecutor.execute(() -> camera.getCameraControl().enableTorch(enabled));
+    }
+
     public void enableTorch() {
-        if (camera != null && camera.getCameraInfo().hasFlashUnit()) {
-            camera.getCameraControl().enableTorch(true);
-        }
+        enableTorch(true);
     }
 
     public void disableTorch() {
-        if (camera != null && camera.getCameraInfo().hasFlashUnit()) {
-            camera.getCameraControl().enableTorch(false);
-        }
+        enableTorch(false);
     }
 
     public void toggleTorch() {
         if (!isTorchAvailable()) return;
-        camera.getCameraControl().enableTorch(!isTorchEnabled());
+        enableTorch(!isTorchEnabled());
     }
+
+    // ===== Zoom =====
 
     public float getZoomRatio() {
         if (camera == null) return 1f;
@@ -174,13 +234,24 @@ public class QrCodeScanner {
     }
 
     public void setZoomRatio(float ratio) {
-        if (camera == null) return;
-        ZoomState zs = camera.getCameraInfo().getZoomState().getValue();
-        if (zs == null) {
-            camera.getCameraControl().setZoomRatio(ratio);
+        // если ещё нет zoom state — запомним
+        if (camera == null || !zoomReady) {
+            pendingZoomRatio = ratio;
             return;
         }
-        float clamped = Math.max(zs.getMinZoomRatio(), Math.min(zs.getMaxZoomRatio(), ratio));
-        camera.getCameraControl().setZoomRatio(clamped);
+
+        mainExecutor.execute(() -> {
+            if (camera == null) return;
+
+            ZoomState zs = camera.getCameraInfo().getZoomState().getValue();
+            if (zs == null) {
+                pendingZoomRatio = ratio;
+                zoomReady = false;
+                return;
+            }
+
+            float clamped = Math.max(zs.getMinZoomRatio(), Math.min(zs.getMaxZoomRatio(), ratio));
+            camera.getCameraControl().setZoomRatio(clamped);
+        });
     }
 }

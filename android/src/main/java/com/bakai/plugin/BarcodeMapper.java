@@ -10,10 +10,6 @@ public final class BarcodeMapper {
 
     private BarcodeMapper() {}
 
-    // =========================
-    // PUBLIC
-    // =========================
-
     public static JSObject toJS(List<Barcode> barcodes) {
         JSArray array = new JSArray();
         for (Barcode barcode : barcodes) {
@@ -28,13 +24,11 @@ public final class BarcodeMapper {
     public static JSObject toJS(Barcode b) {
         JSObject o = new JSObject();
 
-        // ---- basic ----
         o.put("displayValue", safe(b.getDisplayValue()));
         o.put("rawValue", safe(b.getRawValue()));
         o.put("format", mapFormat(b.getFormat()));
         o.put("valueType", mapValueType(b.getValueType()));
 
-        // ---- bytes ----
         if (b.getRawBytes() != null) {
             JSArray bytes = new JSArray();
             for (byte byt : b.getRawBytes()) {
@@ -43,7 +37,6 @@ public final class BarcodeMapper {
             o.put("bytes", bytes);
         }
 
-        // ---- corner points ----
         Point[] points = b.getCornerPoints();
         if (points != null && points.length == 4) {
             JSArray corners = new JSArray();
@@ -56,7 +49,6 @@ public final class BarcodeMapper {
             o.put("cornerPoints", corners);
         }
 
-        // ---- value types ----
         switch (b.getValueType()) {
             case Barcode.TYPE_URL:
                 if (b.getUrl() != null) {
@@ -113,10 +105,6 @@ public final class BarcodeMapper {
 
         return o;
     }
-
-    // =========================
-    // MAPPERS
-    // =========================
 
     private static String mapFormat(int f) {
         switch (f) {

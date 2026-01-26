@@ -42,16 +42,13 @@ public class QrCodeScannerPlugin extends Plugin {
 
         getActivity().runOnUiThread(() -> {
             try {
-                // 1) Root view activity (самый верхний контейнер)
                 FrameLayout root = (FrameLayout) getActivity().getWindow().getDecorView().findViewById(android.R.id.content);
 
-                // 2) Контейнер камеры (чтобы потом легко удалить)
                 cameraContainer = new FrameLayout(getContext());
                 cameraContainer.setLayoutParams(
                     new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
                 );
 
-                // 3) PreviewView камеры
                 previewView = new PreviewView(getContext());
                 previewView.setLayoutParams(
                     new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
@@ -61,10 +58,9 @@ public class QrCodeScannerPlugin extends Plugin {
 
                 cameraContainer.addView(previewView);
 
-                // 4) ВАЖНО: вставляем контейнер камеры в root на индекс 0 => ПОД WebView
+                // под WebView
                 root.addView(cameraContainer, 0);
 
-                // 5) Стартуем сканер
                 scanner = new QrCodeScanner(getContext());
                 scanner.start(
                     getActivity(),
@@ -73,7 +69,8 @@ public class QrCodeScannerPlugin extends Plugin {
                     resolution,
                     new QrCodeScanner.Callback() {
                         @Override
-                        public void onBarcodes(List<com.google.mlkit.vision.barcode.common.Barcode> barcodes) {
+                        public void onBarcodes(List<Barcode> barcodes) {
+                            if (barcodes == null || barcodes.isEmpty()) return;
                             notifyListeners("barcodesScanned", BarcodeMapper.toJS(barcodes));
                         }
 
@@ -82,6 +79,15 @@ public class QrCodeScannerPlugin extends Plugin {
                             JSObject err = new JSObject();
                             err.put("message", message);
                             notifyListeners("scanError", err);
+                        }
+
+                        @Override
+                        public void onZoomReady(float minRatio, float maxRatio, float currentRatio) {
+                            JSObject data = new JSObject();
+                            data.put("zoomRatio", currentRatio); // текущее значение
+                            data.put("zoomRatio", minRatio); // диапазон
+                            data.put("zoomRatio", maxRatio);
+                            notifyListeners("zoomReady", data);
                         }
                     }
                 );
@@ -95,22 +101,27 @@ public class QrCodeScannerPlugin extends Plugin {
 
     @PluginMethod
     public void stopScan(PluginCall call) {
-        if (scanner != null) {
-            scanner.stop();
-            scanner = null;
-        }
-
         getActivity().runOnUiThread(() -> {
-            if (cameraContainer != null) {
-                cameraContainer.removeAllViews();
-                ViewParent parent = cameraContainer.getParent();
-                if (parent instanceof FrameLayout) {
-                    ((FrameLayout) parent).removeView(cameraContainer);
+            try {
+                if (scanner != null) {
+                    scanner.stop();
+                    scanner = null;
                 }
-                cameraContainer = null;
+
+                if (cameraContainer != null) {
+                    cameraContainer.removeAllViews();
+                    ViewParent parent = cameraContainer.getParent();
+                    if (parent instanceof FrameLayout) {
+                        ((FrameLayout) parent).removeView(cameraContainer);
+                    }
+                    cameraContainer = null;
+                }
+
+                previewView = null;
+                call.resolve();
+            } catch (Exception e) {
+                call.reject(e.getMessage());
             }
-            previewView = null;
-            call.resolve();
         });
     }
 
@@ -131,10 +142,9 @@ public class QrCodeScannerPlugin extends Plugin {
         String path = call.getString("path");
         try {
             InputImage image = InputImage.fromFilePath(getContext(), Uri.parse(path));
+            BarcodeScanner sc = BarcodeScanning.getClient();
 
-            BarcodeScanner scanner = BarcodeScanning.getClient();
-
-            scanner
+            sc
                 .process(image)
                 .addOnSuccessListener((barcodes) -> call.resolve(BarcodeMapper.toJS(barcodes)))
                 .addOnFailureListener((e) -> call.reject(e.getMessage()));
@@ -145,9 +155,9 @@ public class QrCodeScannerPlugin extends Plugin {
 
     @PluginMethod
     public void scan(PluginCall call) {
-        GmsBarcodeScanner scanner = GmsBarcodeScanning.getClient(getContext());
+        GmsBarcodeScanner gms = GmsBarcodeScanning.getClient(getContext());
 
-        scanner
+        gms
             .startScan()
             .addOnSuccessListener((barcode) -> {
                 List<Barcode> list = new ArrayList<>();
@@ -156,6 +166,8 @@ public class QrCodeScannerPlugin extends Plugin {
             })
             .addOnFailureListener((e) -> call.reject(e.getMessage()));
     }
+
+    // ===== Permissions =====
 
     @PluginMethod
     public void checkPermissions(PluginCall call) {
@@ -182,24 +194,30 @@ public class QrCodeScannerPlugin extends Plugin {
         call.resolve();
     }
 
-    /// ///
+    // ===== Torch =====
 
     @PluginMethod
     public void enableTorch(PluginCall call) {
-        if (scanner != null) scanner.enableTorch();
-        call.resolve();
+        getActivity().runOnUiThread(() -> {
+            if (scanner != null) scanner.enableTorch();
+            call.resolve();
+        });
     }
 
     @PluginMethod
     public void disableTorch(PluginCall call) {
-        if (scanner != null) scanner.disableTorch();
-        call.resolve();
+        getActivity().runOnUiThread(() -> {
+            if (scanner != null) scanner.disableTorch();
+            call.resolve();
+        });
     }
 
     @PluginMethod
     public void toggleTorch(PluginCall call) {
-        if (scanner != null) scanner.toggleTorch();
-        call.resolve();
+        getActivity().runOnUiThread(() -> {
+            if (scanner != null) scanner.toggleTorch();
+            call.resolve();
+        });
     }
 
     @PluginMethod
@@ -216,6 +234,8 @@ public class QrCodeScannerPlugin extends Plugin {
         call.resolve(ret);
     }
 
+    // ===== Zoom =====
+
     @PluginMethod
     public void setZoomRatio(PluginCall call) {
         Double ratioD = call.getDouble("zoomRatio");
@@ -223,9 +243,21 @@ public class QrCodeScannerPlugin extends Plugin {
             call.reject("zoomRatio is required");
             return;
         }
+
         float ratio = ratioD.floatValue();
-        if (scanner != null) scanner.setZoomRatio(ratio);
-        call.resolve();
+
+        getActivity().runOnUiThread(() -> {
+            if (scanner == null) {
+                call.reject("Scanner not started");
+                return;
+            }
+
+            scanner.setZoomRatio(ratio);
+
+            JSObject ret = new JSObject();
+            ret.put("zoomRatio", scanner.getZoomRatio()); // единый ключ
+            call.resolve(ret);
+        });
     }
 
     @PluginMethod
@@ -237,15 +269,33 @@ public class QrCodeScannerPlugin extends Plugin {
 
     @PluginMethod
     public void getMinZoomRatio(PluginCall call) {
-        JSObject ret = new JSObject();
-        ret.put("zoomRatio", scanner != null ? scanner.getMinZoomRatio() : 1);
-        call.resolve(ret);
+        getActivity().runOnUiThread(() -> {
+            JSObject ret = new JSObject();
+            if (scanner == null) {
+                ret.put("ready", false);
+                ret.put("zoomRatio", 1);
+                call.resolve(ret);
+                return;
+            }
+            ret.put("ready", scanner.isZoomReady());
+            ret.put("zoomRatio", scanner.getMinZoomRatio());
+            call.resolve(ret);
+        });
     }
 
     @PluginMethod
     public void getMaxZoomRatio(PluginCall call) {
-        JSObject ret = new JSObject();
-        ret.put("zoomRatio", scanner != null ? scanner.getMaxZoomRatio() : 1);
-        call.resolve(ret);
+        getActivity().runOnUiThread(() -> {
+            JSObject ret = new JSObject();
+            if (scanner == null) {
+                ret.put("ready", false);
+                ret.put("zoomRatio", 1);
+                call.resolve(ret);
+                return;
+            }
+            ret.put("ready", scanner.isZoomReady());
+            ret.put("zoomRatio", scanner.getMaxZoomRatio());
+            call.resolve(ret);
+        });
     }
 }
