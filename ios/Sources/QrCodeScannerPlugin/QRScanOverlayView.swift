@@ -2,16 +2,9 @@ import UIKit
 
 final class QRScanOverlayView: UIView {
 
-    /// 🔵 90% ширины экрана
     var lineWidthFactor: CGFloat = 0.90
-
-    /// Толщина линии
     var lineHeight: CGFloat = 5
-
-    /// Цвет линии
     var lineColor: UIColor = .systemBlue
-
-    /// Отступ от статусбара (10%)
     var statusBarOffsetFactor: CGFloat = 0.10
 
     private let scanLine = CAGradientLayer()
@@ -66,12 +59,7 @@ final class QRScanOverlayView: UIView {
 
         let yTop = statusBarHeight * (1.0 + statusBarOffsetFactor)
 
-        scanLine.frame = CGRect(
-            x: x,
-            y: yTop,
-            width: width,
-            height: lineHeight
-        )
+        scanLine.frame = CGRect(x: x, y: yTop, width: width, height: lineHeight)
     }
 
     func startAnimating() {
@@ -84,18 +72,10 @@ final class QRScanOverlayView: UIView {
             .statusBarManager?
             .statusBarFrame.height ?? 0
 
-        /// 🔝 старт: статусбар + 10%
         let yTop = statusBarHeight * (3.0 + statusBarOffsetFactor)
-
-        /// 🔽 финиш: почти до низа экрана
         let yBottom = bounds.height * 0.70
 
-        scanLine.frame = CGRect(
-            x: x,
-            y: yTop,
-            width: width,
-            height: lineHeight
-        )
+        scanLine.frame = CGRect(x: x, y: yTop, width: width, height: lineHeight)
 
         let fromY = yTop + lineHeight / 2
         let toY   = yBottom - lineHeight / 2
@@ -110,9 +90,35 @@ final class QRScanOverlayView: UIView {
         anim.isRemovedOnCompletion = false
 
         scanLine.add(anim, forKey: animKey)
+
+        // важное: сбросить тайминги, если до этого была пауза
+        scanLine.speed = 1
+        scanLine.timeOffset = 0
+        scanLine.beginTime = 0
     }
 
     func stopAnimating() {
         scanLine.removeAnimation(forKey: animKey)
+        scanLine.speed = 1
+        scanLine.timeOffset = 0
+        scanLine.beginTime = 0
+    }
+
+    // ✅ Пауза без removeAnimation
+    func pauseAnimating() {
+        let pausedTime = scanLine.convertTime(CACurrentMediaTime(), from: nil)
+        scanLine.speed = 0
+        scanLine.timeOffset = pausedTime
+    }
+
+    // ✅ Resume продолжает с того же места
+    func resumeAnimating() {
+        let pausedTime = scanLine.timeOffset
+        scanLine.speed = 1
+        scanLine.timeOffset = 0
+        scanLine.beginTime = 0
+
+        let timeSincePause = scanLine.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
+        scanLine.beginTime = timeSincePause
     }
 }

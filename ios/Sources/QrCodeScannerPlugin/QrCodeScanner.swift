@@ -2,26 +2,45 @@ import AVFoundation
 import Vision
 import UIKit
 
-final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+final class QrCodeScanner: NSObject {
 
     private let session = AVCaptureSession()
 
-    // ✅ ОЧЕРЕДЬ ТОЛЬКО ДЛЯ session begin/commit/start/stop + add/remove input/output
     private let sessionQueue = DispatchQueue(label: "qr.session.queue")
-
-    // ✅ ОЧЕРЕДЬ ТОЛЬКО ДЛЯ sampleBuffer/Vision
     private let videoQueue = DispatchQueue(label: "qr.video.queue")
 
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var overlay: QRScanOverlayView?
+
     private var paused = false
     private var currentDevice: AVCaptureDevice?
+    private var currentPosition: AVCaptureDevice.Position = .back
 
-    // чтобы не было гонок start/stop подряд
     private var startStopToken = UUID()
+
+    // Video output (Vision)
+    private var videoOutput: AVCaptureVideoDataOutput?
+    private var videoConnection: AVCaptureConnection?
+
+    // Photo output (Freeze)
+    private var photoOutput: AVCapturePhotoOutput?
+    private var isCapturingFreezePhoto = false
+    private var pendingDisableVideoAfterPhoto = false
+
+    // Freeze UI
+    private var freezeView: UIImageView?
+
+    // ✅ SAFETY: configuration depth (0 => safe to stopRunning)
+    private var configDepth: Int = 0
+    private var pendingStop: Bool = false
+
+    // ✅ ensure stopRunning is never called in same tick as begin/commit
+    private var stopScheduled: Bool = false
 
     var onResult: (([VNBarcodeObservation]) -> Void)?
     var onError: ((String) -> Void)?
+
+    // MARK: - Overlay
 
     private func attachOverlay(to previewView: UIView) {
         overlay?.removeFromSuperview()
@@ -34,6 +53,37 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         ov.startAnimating()
     }
 
+    // MARK: - StopRunning scheduler (✅ no crash on iOS 26)
+
+    // Must be called ONLY on sessionQueue
+    private func scheduleStopRunning() {
+        if stopScheduled { return }
+        stopScheduled = true
+
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            // Still configuring -> retry later
+            if self.configDepth > 0 {
+                self.stopScheduled = false
+                self.pendingStop = true
+                self.scheduleStopRunning()
+                return
+            }
+
+            self.stopScheduled = false
+            self.pendingStop = false
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            self.videoConnection = nil
+            self.videoOutput = nil
+            self.photoOutput = nil
+        }
+    }
+
     // MARK: - Start
 
     func start(previewView: UIView, lens: String, resolution: Int) throws {
@@ -41,37 +91,46 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         startStopToken = token
 
         paused = false
+        isCapturingFreezePhoto = false
+        pendingDisableVideoAfterPhoto = false
 
-        // lens
         let position: AVCaptureDevice.Position = (lens == "FRONT") ? .front : .back
+        currentPosition = position
 
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
             throw NSError(domain: "QrCodeScanner", code: 1, userInfo: [NSLocalizedDescriptionKey: "No camera device"])
         }
-
         currentDevice = device
 
         sessionQueue.async { [weak self, weak previewView] in
             guard let self = self else { return }
             guard self.startStopToken == token else { return }
 
-            // 1) CONFIGURE (begin/commit) — НИКАКИХ start/stop внутри
+            // ✅ BEGIN CONFIGURE (commit guaranteed)
+            self.configDepth += 1
             self.session.beginConfiguration()
+
+            defer {
+                self.session.commitConfiguration()
+                self.configDepth = max(0, self.configDepth - 1)
+
+                // ✅ if stop requested during configuration, stop safely AFTER commit (next tick)
+                if self.pendingStop && self.configDepth == 0 {
+                    self.scheduleStopRunning()
+                }
+            }
 
             // preset
             switch resolution {
-            case 0:
-                self.session.sessionPreset = .vga640x480
-            case 2:
-                self.session.sessionPreset = .hd1920x1080
+            case 0: self.session.sessionPreset = .vga640x480
+            case 2: self.session.sessionPreset = .hd1920x1080
             case 3:
                 if self.session.canSetSessionPreset(.hd4K3840x2160) {
                     self.session.sessionPreset = .hd4K3840x2160
                 } else {
                     self.session.sessionPreset = .hd1920x1080
                 }
-            default:
-                self.session.sessionPreset = .hd1280x720
+            default: self.session.sessionPreset = .hd1280x720
             }
 
             // clear old
@@ -82,83 +141,97 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             do {
                 let input = try AVCaptureDeviceInput(device: device)
                 guard self.session.canAddInput(input) else {
-                    self.session.commitConfiguration()
                     DispatchQueue.main.async { [weak self] in self?.onError?("Cannot add camera input") }
                     return
                 }
                 self.session.addInput(input)
             } catch {
-                self.session.commitConfiguration()
                 DispatchQueue.main.async { [weak self] in self?.onError?(error.localizedDescription) }
                 return
             }
 
-            // output
-            let output = AVCaptureVideoDataOutput()
-            output.alwaysDiscardsLateVideoFrames = true
-            output.videoSettings = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ]
-            output.setSampleBufferDelegate(self, queue: self.videoQueue)
+            // video output (Vision)
+            let vOut = AVCaptureVideoDataOutput()
+            vOut.alwaysDiscardsLateVideoFrames = true
+            vOut.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            vOut.setSampleBufferDelegate(self, queue: self.videoQueue)
 
-            guard self.session.canAddOutput(output) else {
-                self.session.commitConfiguration()
+            guard self.session.canAddOutput(vOut) else {
                 DispatchQueue.main.async { [weak self] in self?.onError?("Cannot add camera output") }
                 return
             }
-            self.session.addOutput(output)
+            self.session.addOutput(vOut)
+            self.videoOutput = vOut
+            self.videoConnection = vOut.connection(with: .video)
+            self.videoConnection?.isEnabled = true
 
-            // ✅ commit ДО startRunning
-            self.session.commitConfiguration()
-
-            // 2) START — только после commit
-            if self.startStopToken != token { return }
-            if !self.session.isRunning {
-                self.session.startRunning()
+            // photo output (Freeze)
+            let pOut = AVCapturePhotoOutput()
+            guard self.session.canAddOutput(pOut) else {
+                DispatchQueue.main.async { [weak self] in self?.onError?("Cannot add photo output") }
+                return
             }
+            self.session.addOutput(pOut)
+            self.photoOutput = pOut
 
-            // 3) UI — строго main
-            DispatchQueue.main.async { [weak self, weak previewView] in
-                guard let self = self, let previewView = previewView else { return }
+            // ✅ startRunning must be after commit; schedule next tick
+            self.sessionQueue.async { [weak self, weak previewView] in
+                guard let self = self else { return }
                 guard self.startStopToken == token else { return }
+                guard self.configDepth == 0 else { return }
 
-                let layer = AVCaptureVideoPreviewLayer(session: self.session)
-                layer.videoGravity = .resizeAspectFill
-                layer.frame = previewView.bounds
+                if !self.session.isRunning {
+                    self.session.startRunning()
+                }
 
-                previewView.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
-                previewView.layer.addSublayer(layer)
-                self.previewLayer = layer
+                DispatchQueue.main.async { [weak self, weak previewView] in
+                    guard let self = self, let previewView = previewView else { return }
+                    guard self.startStopToken == token else { return }
 
-                self.attachOverlay(to: previewView)
+                    let layer = AVCaptureVideoPreviewLayer(session: self.session)
+                    layer.videoGravity = .resizeAspectFill
+                    layer.frame = previewView.bounds
+
+                    // portrait-only
+                    if let c = layer.connection, c.isVideoOrientationSupported {
+                        c.videoOrientation = .portrait
+                    }
+                    // mirror preview for front
+                    if let c = layer.connection, c.isVideoMirroringSupported {
+                        c.automaticallyAdjustsVideoMirroring = false
+                        c.isVideoMirrored = (self.currentPosition == .front)
+                    }
+
+                    previewView.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+                    previewView.layer.addSublayer(layer)
+                    self.previewLayer = layer
+
+                    self.attachOverlay(to: previewView)
+                }
             }
         }
     }
-
 
     func updatePreviewFrame(_ frame: CGRect) {
         DispatchQueue.main.async { [weak self] in
             self?.previewLayer?.frame = frame
             self?.overlay?.frame = frame
+            self?.freezeView?.frame = frame
         }
     }
 
-    // MARK: - Stop / Pause / Resume
+    // MARK: - Stop (✅ no crash)
 
     func stop() {
         paused = true
-        let token = UUID()
-        startStopToken = token
+        startStopToken = UUID()
 
-        // ✅ stopRunning только на sessionQueue — тогда он никогда не попадёт внутрь begin/commit
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            if self.session.isRunning {
-                self.session.stopRunning()
-            }
+            self.pendingStop = true
+            self.scheduleStopRunning()
         }
 
-        // UI чистим на main
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
@@ -168,13 +241,68 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             self.overlay?.stopAnimating()
             self.overlay?.removeFromSuperview()
             self.overlay = nil
+
+            self.freezeView?.removeFromSuperview()
+            self.freezeView = nil
         }
     }
 
-    func pause() { paused = true }
-    func resume() { paused = false }
+    // MARK: - Pause / Resume (no stopRunning/startRunning)
 
-    // MARK: - Torch
+    func pause(previewHostView: UIView?) {
+        paused = true
+
+        DispatchQueue.main.async { [weak self, weak previewHostView] in
+            guard let self = self, let host = previewHostView else { return }
+
+            self.overlay?.pauseAnimating()
+
+            if self.freezeView == nil {
+                let iv = UIImageView(frame: host.bounds)
+                iv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                iv.contentMode = .scaleAspectFill
+                iv.isUserInteractionEnabled = false
+                iv.backgroundColor = .clear
+                host.addSubview(iv)
+                self.freezeView = iv
+            }
+            self.freezeView?.isHidden = false
+
+            self.captureFreezePhoto()
+        }
+    }
+
+    func resume() {
+        sessionQueue.async { [weak self] in
+            self?.videoConnection?.isEnabled = true
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.freezeView?.image = nil
+            self.freezeView?.isHidden = true
+            self.overlay?.resumeAnimating()
+        }
+
+        paused = false
+    }
+
+    private func captureFreezePhoto() {
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard !self.isCapturingFreezePhoto else { return }
+            guard let pOut = self.photoOutput else { return }
+
+            self.isCapturingFreezePhoto = true
+            self.pendingDisableVideoAfterPhoto = true
+
+            let settings = AVCapturePhotoSettings()
+            settings.flashMode = .off
+            pOut.capturePhoto(with: settings, delegate: self)
+        }
+    }
+
+    // MARK: - Torch / Zoom
 
     func isTorchAvailable() -> Bool { currentDevice?.hasTorch == true }
     func isTorchEnabled() -> Bool { currentDevice?.torchMode == .on }
@@ -206,8 +334,6 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         } catch { onError?("Torch error") }
     }
 
-    // MARK: - Zoom
-
     func setZoom(_ ratio: CGFloat) {
         guard let device = currentDevice else { return }
         let maxZoom = device.activeFormat.videoMaxZoomFactor
@@ -222,12 +348,16 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     func getZoomRatio() -> CGFloat { currentDevice?.videoZoomFactor ?? 1.0 }
     func getMinZoomRatio() -> CGFloat { 1.0 }
     func getMaxZoomRatio() -> CGFloat { currentDevice?.activeFormat.videoMaxZoomFactor ?? 1.0 }
+}
 
-    // MARK: - Capture output (Vision)
+// MARK: - Vision frames
+
+extension QrCodeScanner: AVCaptureVideoDataOutputSampleBufferDelegate {
 
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+
         if paused { return }
 
         let request = VNDetectBarcodesRequest { [weak self] req, err in
@@ -242,5 +372,43 @@ final class QrCodeScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let handler = VNImageRequestHandler(cmSampleBuffer: sampleBuffer, orientation: .up)
         do { try handler.perform([request]) }
         catch { onError?(error.localizedDescription) }
+    }
+}
+
+// MARK: - Freeze photo
+
+extension QrCodeScanner: AVCapturePhotoCaptureDelegate {
+
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishProcessingPhoto photo: AVCapturePhoto,
+                     error: Error?) {
+
+        defer {
+            sessionQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.isCapturingFreezePhoto = false
+
+                // after freeze, disable video frames (CPU 0)
+                if self.pendingDisableVideoAfterPhoto {
+                    self.pendingDisableVideoAfterPhoto = false
+                    self.videoConnection?.isEnabled = false
+                }
+            }
+        }
+
+        if let error = error {
+            DispatchQueue.main.async { [weak self] in self?.onError?(error.localizedDescription) }
+            return
+        }
+
+        guard let data = photo.fileDataRepresentation(),
+              let img = UIImage(data: data) else {
+            DispatchQueue.main.async { [weak self] in self?.onError?("Freeze photo failed") }
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.freezeView?.image = img
+        }
     }
 }

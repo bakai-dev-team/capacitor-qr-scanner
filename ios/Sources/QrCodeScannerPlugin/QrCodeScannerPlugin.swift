@@ -118,15 +118,16 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - pause / resume
 
-    @objc func pauseScan(_ call: CAPPluginCall) {
-        scanner.pause()
-        call.resolve()
-    }
+ @objc func pauseScan(_ call: CAPPluginCall) {
+     scanner.pause(previewHostView: previewView) // ✅ freeze + disable connection
+     call.resolve()
+ }
 
-    @objc func resumeScan(_ call: CAPPluginCall) {
-        scanner.resume()
-        call.resolve()
-    }
+   @objc func resumeScan(_ call: CAPPluginCall) {
+       scanner.resume() // ✅ enable connection + убрать freeze
+       call.resolve()
+   }
+
 
     // MARK: - zoom
 
