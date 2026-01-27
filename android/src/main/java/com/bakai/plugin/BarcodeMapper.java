@@ -12,8 +12,10 @@ public final class BarcodeMapper {
 
     public static JSObject toJS(List<Barcode> barcodes) {
         JSArray array = new JSArray();
-        for (Barcode barcode : barcodes) {
-            array.put(toJS(barcode));
+        if (barcodes != null) {
+            for (Barcode barcode : barcodes) {
+                if (barcode != null) array.put(toJS(barcode));
+            }
         }
 
         JSObject result = new JSObject();
@@ -23,16 +25,18 @@ public final class BarcodeMapper {
 
     public static JSObject toJS(Barcode b) {
         JSObject o = new JSObject();
+        if (b == null) return o;
 
         o.put("displayValue", safe(b.getDisplayValue()));
         o.put("rawValue", safe(b.getRawValue()));
         o.put("format", mapFormat(b.getFormat()));
         o.put("valueType", mapValueType(b.getValueType()));
 
-        if (b.getRawBytes() != null) {
+        byte[] rawBytes = b.getRawBytes();
+        if (rawBytes != null && rawBytes.length > 0) {
             JSArray bytes = new JSArray();
-            for (byte byt : b.getRawBytes()) {
-                bytes.put((int) byt & 0xff);
+            for (byte byt : rawBytes) {
+                bytes.put(((int) byt) & 0xff);
             }
             o.put("bytes", bytes);
         }
@@ -41,6 +45,7 @@ public final class BarcodeMapper {
         if (points != null && points.length == 4) {
             JSArray corners = new JSArray();
             for (Point p : points) {
+                if (p == null) continue;
                 JSArray point = new JSArray();
                 point.put(p.x);
                 point.put(p.y);
@@ -100,6 +105,8 @@ public final class BarcodeMapper {
                     sms.put("message", safe(b.getSms().getMessage()));
                     o.put("sms", sms);
                 }
+                break;
+            default:
                 break;
         }
 
@@ -173,6 +180,7 @@ public final class BarcodeMapper {
         }
     }
 
+    // оставил как у тебя, чтобы не ломать контракт
     private static int mapEmailType(int t) {
         switch (t) {
             case Barcode.Email.TYPE_HOME:

@@ -31,13 +31,7 @@ enum BarcodeMapper {
         return result
     }
 
-    // =========================
-    // MAPPERS
-    // =========================
-
-    private static func mapFormat(
-        _ symbology: VNBarcodeSymbology
-    ) -> String {
+    private static func mapFormat(_ symbology: VNBarcodeSymbology) -> String {
         switch symbology {
         case .QR: return "QR_CODE"
         case .Code128: return "CODE_128"

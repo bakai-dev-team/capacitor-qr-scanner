@@ -22,16 +22,34 @@ final class QrCodeScanner: NSObject {
     private var videoOutput: AVCaptureVideoDataOutput?
     private var videoConnection: AVCaptureConnection?
 
-    // Photo output (Freeze)
-    private var photoOutput: AVCapturePhotoOutput?
-    private var isCapturingFreezePhoto = false
-    private var pendingDisableVideoAfterPhoto = false
-
     // Freeze UI
     private var freezeView: UIImageView?
 
     var onResult: (([VNBarcodeObservation]) -> Void)?
     var onError: ((String) -> Void)?
+
+    // =========================
+    // OPT: Vision reuse + throttle + no parallel
+    // =========================
+    private let sequenceHandler = VNSequenceRequestHandler()
+    private var detectRequest: VNDetectBarcodesRequest?
+    private var isProcessingFrame = false
+    private var lastProcessTime = CFAbsoluteTimeGetCurrent()
+    private var minProcessInterval: CFTimeInterval = 1.0 / 12.0 // 12fps обработки
+
+    // =========================
+    // DOUBLE BUFFER for freeze (STRICTLY last QR-detect)
+    // =========================
+    // Два "последних успешных детекта"
+    private var detectedImages: [UIImage?] = [nil, nil]
+    private var detectedIndex: Int = 0
+    private var hasDetectedAtLeastOnce: Bool = false
+
+    // Последний видеокадр (fallback если детекта ещё не было)
+    private var lastFrameImage: UIImage?
+
+    // CIContext держим 1 раз
+    private let ciContext = CIContext(options: nil)
 
     // MARK: - Overlay
 
@@ -47,14 +65,49 @@ final class QrCodeScanner: NSObject {
     }
 
     // MARK: - Start
-    
+
     func start(previewView: UIView, lens: String, resolution: Int) throws {
         let token = UUID()
         startStopToken = token
 
         paused = false
-        isCapturingFreezePhoto = false
-        pendingDisableVideoAfterPhoto = false
+
+        // reset perf state
+        isProcessingFrame = false
+        lastProcessTime = CFAbsoluteTimeGetCurrent()
+
+        // reset buffers
+        detectedImages = [nil, nil]
+        detectedIndex = 0
+        hasDetectedAtLeastOnce = false
+        lastFrameImage = nil
+
+        // init request once
+        let req = VNDetectBarcodesRequest { [weak self] req, err in
+            guard let self = self else { return }
+            self.isProcessingFrame = false
+
+            if let err = err {
+                self.onError?(err.localizedDescription)
+                return
+            }
+
+            let results = req.results as? [VNBarcodeObservation] ?? []
+
+            // ✅ Привязка кадра строго к детекту:
+            // если найдено хотя бы 1 — сохраняем текущий lastFrameImage в double-buffer
+            if !results.isEmpty, let img = self.lastFrameImage {
+                self.detectedIndex = 1 - self.detectedIndex
+                self.detectedImages[self.detectedIndex] = img
+                self.hasDetectedAtLeastOnce = true
+            }
+
+            self.onResult?(results)
+        }
+
+        // Если нужен только QR — можно ускорить:
+        // req.symbologies = [.QR]
+        detectRequest = req
 
         let position: AVCaptureDevice.Position = (lens == "FRONT") ? .front : .back
         currentPosition = position
@@ -64,14 +117,11 @@ final class QrCodeScanner: NSObject {
         }
         currentDevice = device
 
-        // 1) CONFIGURE graph (begin/commit only)
         sessionQueue.async { [weak self, weak previewView] in
             guard let self = self else { return }
             guard self.startStopToken == token else { return }
 
             self.session.beginConfiguration()
-
-            // ✅ guarantee commit happens before we do anything else
             defer { self.session.commitConfiguration() }
 
             // preset
@@ -107,7 +157,11 @@ final class QrCodeScanner: NSObject {
             // video output (Vision)
             let vOut = AVCaptureVideoDataOutput()
             vOut.alwaysDiscardsLateVideoFrames = true
-            vOut.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+
+            vOut.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            ]
+
             vOut.setSampleBufferDelegate(self, queue: self.videoQueue)
 
             guard self.session.canAddOutput(vOut) else {
@@ -115,23 +169,19 @@ final class QrCodeScanner: NSObject {
                 return
             }
             self.session.addOutput(vOut)
+
             self.videoOutput = vOut
             self.videoConnection = vOut.connection(with: .video)
-            self.videoConnection?.isEnabled = true
-
-            // photo output (Freeze)
-            let pOut = AVCapturePhotoOutput()
-            guard self.session.canAddOutput(pOut) else {
-                DispatchQueue.main.async { [weak self] in self?.onError?("Cannot add photo output") }
-                return
+            if let c = self.videoConnection {
+                c.isEnabled = true
+                if c.isVideoOrientationSupported { c.videoOrientation = .portrait }
+                if c.isVideoMirroringSupported {
+                    c.automaticallyAdjustsVideoMirroring = false
+                    c.isVideoMirrored = (self.currentPosition == .front)
+                }
             }
-            self.session.addOutput(pOut)
-            self.photoOutput = pOut
 
-            // ✅ IMPORTANT: do NOT call startRunning here
-            // commit will happen via defer before we go to next block
-
-            // 2) START running + UI (next tick on sessionQueue)
+            // start running + UI
             self.sessionQueue.async { [weak self, weak previewView] in
                 guard let self = self else { return }
                 guard self.startStopToken == token else { return }
@@ -148,11 +198,9 @@ final class QrCodeScanner: NSObject {
                     layer.videoGravity = .resizeAspectFill
                     layer.frame = previewView.bounds
 
-                    // portrait-only
                     if let c = layer.connection, c.isVideoOrientationSupported {
                         c.videoOrientation = .portrait
                     }
-                    // mirror preview for front
                     if let c = layer.connection, c.isVideoMirroringSupported {
                         c.automaticallyAdjustsVideoMirroring = false
                         c.isVideoMirrored = (self.currentPosition == .front)
@@ -176,13 +224,12 @@ final class QrCodeScanner: NSObject {
         }
     }
 
-    // MARK: - Stop (✅ NO stopRunning => NO crash)
+    // MARK: - Stop
 
     func stop() {
         paused = true
         startStopToken = UUID()
 
-        // 1) Detach UI immediately
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
@@ -197,16 +244,19 @@ final class QrCodeScanner: NSObject {
             self.freezeView = nil
         }
 
-        // 2) Release camera by removing ALL inputs/outputs (no stopRunning)
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
 
             self.videoConnection?.isEnabled = false
             self.videoConnection = nil
             self.videoOutput = nil
-            self.photoOutput = nil
-            self.isCapturingFreezePhoto = false
-            self.pendingDisableVideoAfterPhoto = false
+
+            self.detectRequest = nil
+            self.isProcessingFrame = false
+
+            self.detectedImages = [nil, nil]
+            self.lastFrameImage = nil
+            self.hasDetectedAtLeastOnce = false
 
             self.session.beginConfiguration()
             defer { self.session.commitConfiguration() }
@@ -218,12 +268,18 @@ final class QrCodeScanner: NSObject {
         }
     }
 
-    // MARK: - Pause / Resume (no restart)
+    // MARK: - Pause / Resume
 
     func pause(previewHostView: UIView?) {
         paused = true
 
-        // Freeze UI + overlay pause
+        // 1) Выключаем поток кадров (CPU ~ 0)
+        sessionQueue.async { [weak self] in
+            self?.videoConnection?.isEnabled = false
+            self?.isProcessingFrame = false
+        }
+
+        // 2) Freeze: строго последний QR-детект, иначе fallback
         DispatchQueue.main.async { [weak self, weak previewHostView] in
             guard let self = self, let host = previewHostView else { return }
 
@@ -238,19 +294,23 @@ final class QrCodeScanner: NSObject {
                 host.addSubview(iv)
                 self.freezeView = iv
             }
-            self.freezeView?.isHidden = false
 
-            self.captureFreezePhoto()
+            let detected = self.detectedImages[self.detectedIndex]
+            let fallback = self.lastFrameImage
+
+            self.freezeView?.image = detected ?? fallback
+            self.freezeView?.isHidden = false
         }
     }
 
     func resume() {
-        // enable frames
         sessionQueue.async { [weak self] in
-            self?.videoConnection?.isEnabled = true
+            guard let self = self else { return }
+            self.videoConnection?.isEnabled = true
+            self.isProcessingFrame = false
+            self.lastProcessTime = CFAbsoluteTimeGetCurrent()
         }
 
-        // hide freeze + overlay resume
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.freezeView?.image = nil
@@ -261,67 +321,74 @@ final class QrCodeScanner: NSObject {
         paused = false
     }
 
-    private func captureFreezePhoto() {
-        sessionQueue.async { [weak self] in
-            guard let self = self else { return }
-            guard !self.isCapturingFreezePhoto else { return }
-            guard let pOut = self.photoOutput else { return }
-
-            self.isCapturingFreezePhoto = true
-            self.pendingDisableVideoAfterPhoto = true
-
-            let settings = AVCapturePhotoSettings()
-            settings.flashMode = .off
-            pOut.capturePhoto(with: settings, delegate: self)
-        }
-    }
-
     // MARK: - Torch / Zoom
 
     func isTorchAvailable() -> Bool { currentDevice?.hasTorch == true }
     func isTorchEnabled() -> Bool { currentDevice?.torchMode == .on }
 
     func enableTorch() {
-        guard let device = currentDevice, device.hasTorch else { return }
-        do {
-            try device.lockForConfiguration()
-            device.torchMode = .on
-            device.unlockForConfiguration()
-        } catch { onError?("Torch error") }
+        sessionQueue.async { [weak self] in
+            guard let self = self, let device = self.currentDevice, device.hasTorch else { return }
+            do {
+                try device.lockForConfiguration()
+                device.torchMode = .on
+                device.unlockForConfiguration()
+            } catch { DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") } }
+        }
     }
 
     func disableTorch() {
-        guard let device = currentDevice, device.hasTorch else { return }
-        do {
-            try device.lockForConfiguration()
-            device.torchMode = .off
-            device.unlockForConfiguration()
-        } catch { onError?("Torch error") }
+        sessionQueue.async { [weak self] in
+            guard let self = self, let device = self.currentDevice, device.hasTorch else { return }
+            do {
+                try device.lockForConfiguration()
+                device.torchMode = .off
+                device.unlockForConfiguration()
+            } catch { DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") } }
+        }
     }
 
     func toggleTorch() {
-        guard let device = currentDevice, device.hasTorch else { return }
-        do {
-            try device.lockForConfiguration()
-            device.torchMode = (device.torchMode == .on) ? .off : .on
-            device.unlockForConfiguration()
-        } catch { onError?("Torch error") }
+        sessionQueue.async { [weak self] in
+            guard let self = self, let device = self.currentDevice, device.hasTorch else { return }
+            do {
+                try device.lockForConfiguration()
+                device.torchMode = (device.torchMode == .on) ? .off : .on
+                device.unlockForConfiguration()
+            } catch { DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") } }
+        }
     }
 
     func setZoom(_ ratio: CGFloat) {
-        guard let device = currentDevice else { return }
-        let maxZoom = device.activeFormat.videoMaxZoomFactor
-        let clamped = min(max(1.0, ratio), maxZoom)
-        do {
-            try device.lockForConfiguration()
-            device.videoZoomFactor = clamped
-            device.unlockForConfiguration()
-        } catch { onError?("Zoom error") }
+        sessionQueue.async { [weak self] in
+            guard let self = self, let device = self.currentDevice else { return }
+            let maxZoom = device.activeFormat.videoMaxZoomFactor
+            let clamped = min(max(1.0, ratio), maxZoom)
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clamped
+                device.unlockForConfiguration()
+            } catch {
+                DispatchQueue.main.async { [weak self] in self?.onError?("Zoom error") }
+            }
+        }
     }
 
     func getZoomRatio() -> CGFloat { currentDevice?.videoZoomFactor ?? 1.0 }
     func getMinZoomRatio() -> CGFloat { 1.0 }
     func getMaxZoomRatio() -> CGFloat { currentDevice?.activeFormat.videoMaxZoomFactor ?? 1.0 }
+
+    // MARK: - Frame to UIImage (FIX: no extra rotation)
+
+    private func makeUIImage(from sampleBuffer: CMSampleBuffer) -> UIImage? {
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+        let ci = CIImage(cvPixelBuffer: pb)
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return nil }
+
+        // ✅ ВАЖНО: .up — иначе получишь +90° относительно previewLayer (portrait)
+        // Зеркалирование фронта уже делает previewLayer, а freeze нам нужен "как на экране"
+        return UIImage(cgImage: cg, scale: UIScreen.main.scale, orientation: .up)
+    }
 }
 
 // MARK: - Vision frames
@@ -333,56 +400,26 @@ extension QrCodeScanner: AVCaptureVideoDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
 
         if paused { return }
+        guard let request = detectRequest else { return }
 
-        let request = VNDetectBarcodesRequest { [weak self] req, err in
-            if let err = err {
-                self?.onError?(err.localizedDescription)
-                return
-            }
-            let results = req.results as? [VNBarcodeObservation] ?? []
-            self?.onResult?(results)
+        let now = CFAbsoluteTimeGetCurrent()
+        if isProcessingFrame { return }
+        if (now - lastProcessTime) < minProcessInterval { return }
+
+        isProcessingFrame = true
+        lastProcessTime = now
+
+        // Кадр этого прогона — будет привязан к детекту
+        if let img = makeUIImage(from: sampleBuffer) {
+            lastFrameImage = img
         }
 
-        let handler = VNImageRequestHandler(cmSampleBuffer: sampleBuffer, orientation: .up)
-        do { try handler.perform([request]) }
-        catch { onError?(error.localizedDescription) }
-    }
-}
-
-// MARK: - Freeze photo
-
-extension QrCodeScanner: AVCapturePhotoCaptureDelegate {
-
-    func photoOutput(_ output: AVCapturePhotoOutput,
-                     didFinishProcessingPhoto photo: AVCapturePhoto,
-                     error: Error?) {
-
-        defer {
-            sessionQueue.async { [weak self] in
-                guard let self = self else { return }
-                self.isCapturingFreezePhoto = false
-
-                // after freeze, disable video frames (CPU 0)
-                if self.pendingDisableVideoAfterPhoto {
-                    self.pendingDisableVideoAfterPhoto = false
-                    self.videoConnection?.isEnabled = false
-                }
-            }
-        }
-
-        if let error = error {
-            DispatchQueue.main.async { [weak self] in self?.onError?(error.localizedDescription) }
-            return
-        }
-
-        guard let data = photo.fileDataRepresentation(),
-              let img = UIImage(data: data) else {
-            DispatchQueue.main.async { [weak self] in self?.onError?("Freeze photo failed") }
-            return
-        }
-
-        DispatchQueue.main.async { [weak self] in
-            self?.freezeView?.image = img
+        do {
+            // previewLayer уже в portrait, поэтому Vision оставляем .up
+            try sequenceHandler.perform([request], on: sampleBuffer, orientation: .up)
+        } catch {
+            isProcessingFrame = false
+            onError?(error.localizedDescription)
         }
     }
 }

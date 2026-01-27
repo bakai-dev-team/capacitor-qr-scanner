@@ -91,7 +91,6 @@ final class QRScanOverlayView: UIView {
 
         scanLine.add(anim, forKey: animKey)
 
-        // важное: сбросить тайминги, если до этого была пауза
         scanLine.speed = 1
         scanLine.timeOffset = 0
         scanLine.beginTime = 0
@@ -104,14 +103,12 @@ final class QRScanOverlayView: UIView {
         scanLine.beginTime = 0
     }
 
-    // ✅ Пауза без removeAnimation
     func pauseAnimating() {
         let pausedTime = scanLine.convertTime(CACurrentMediaTime(), from: nil)
         scanLine.speed = 0
         scanLine.timeOffset = pausedTime
     }
 
-    // ✅ Resume продолжает с того же места
     func resumeAnimating() {
         let pausedTime = scanLine.timeOffset
         scanLine.speed = 1

@@ -6,7 +6,6 @@ import Vision
 @objc(QrCodeScannerPlugin)
 public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
 
-    // ВАЖНО: эти поля делают плагин “видимым” для Capacitor 7 без .m регистратора
     public let identifier = "QrCodeScannerPlugin"
     public let jsName = "QrCodeScanner"
     public let pluginMethods: [CAPPluginMethod] = [
@@ -31,15 +30,12 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
 
         CAPPluginMethod(name: "openSettings", returnType: CAPPluginReturnPromise),
 
-        // permissions
         CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "requestPermissions", returnType: CAPPluginReturnPromise)
     ]
 
     private let scanner = QrCodeScanner()
     private var previewView: UIView?
-
-    // MARK: - startScan
 
     @objc func startScan(_ call: CAPPluginCall) {
 
@@ -61,25 +57,20 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
 
-            // 1) делаем WebView прозрачным (иначе камеру не видно)
             webView.isOpaque = false
             webView.backgroundColor = .clear
             webView.scrollView.backgroundColor = .clear
 
-            // 2) создаём previewView
             let pv = UIView(frame: container.bounds)
             pv.backgroundColor = .clear
-            pv.isUserInteractionEnabled = false // чтобы клики шли в UI
+            pv.isUserInteractionEnabled = false
             self.previewView = pv
 
-            // 3) вставляем ПОД WebView
             let webIndex = container.subviews.firstIndex(of: webView) ?? container.subviews.count
             container.insertSubview(pv, at: max(0, webIndex))
 
-            // 4) обновление фрейма при rotate/resize (минимально)
             pv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-            // 5) слушатели
             self.scanner.onResult = { [weak self] barcodes in
                 guard let self = self else { return }
                 self.notifyListeners("barcodesScanned", data: BarcodeMapper.toJS(barcodes))
@@ -90,22 +81,14 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.notifyListeners("scanError", data: ["message": message])
             }
 
-            // 6) старт камеры
             do {
-                try self.scanner.start(
-                    previewView: pv,
-                    lens: lens,
-                    resolution: resolution
-                )
+                try self.scanner.start(previewView: pv, lens: lens, resolution: resolution)
                 call.resolve()
             } catch {
                 call.reject("Camera error")
             }
         }
-
     }
-
-    // MARK: - stopScan
 
     @objc func stopScan(_ call: CAPPluginCall) {
         scanner.stop()
@@ -116,20 +99,15 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    // MARK: - pause / resume
+    @objc func pauseScan(_ call: CAPPluginCall) {
+        scanner.pause(previewHostView: previewView) // ✅ без звука, строго по последнему детекту
+        call.resolve()
+    }
 
- @objc func pauseScan(_ call: CAPPluginCall) {
-     scanner.pause(previewHostView: previewView) // ✅ freeze + disable connection
-     call.resolve()
- }
-
-   @objc func resumeScan(_ call: CAPPluginCall) {
-       scanner.resume() // ✅ enable connection + убрать freeze
-       call.resolve()
-   }
-
-
-    // MARK: - zoom
+    @objc func resumeScan(_ call: CAPPluginCall) {
+        scanner.resume()
+        call.resolve()
+    }
 
     @objc func setZoomRatio(_ call: CAPPluginCall) {
         let ratio = call.getFloat("zoomRatio") ?? 1
@@ -148,8 +126,6 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func getMaxZoomRatio(_ call: CAPPluginCall) {
         call.resolve(["zoomRatio": scanner.getMaxZoomRatio()])
     }
-
-    // MARK: - torch
 
     @objc func enableTorch(_ call: CAPPluginCall) {
         scanner.enableTorch()
@@ -174,8 +150,6 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["available": scanner.isTorchAvailable()])
     }
 
-    // MARK: - readBarcodesFromImage
-
     @objc func readBarcodesFromImage(_ call: CAPPluginCall) {
 
         guard let path = call.getString("path") else {
@@ -197,8 +171,6 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Failed to read barcodes from image")
         }
     }
-
-    // MARK: - scan (simple full screen)
 
     @objc func scan(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
@@ -226,8 +198,6 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
     }
-
-    // MARK: - permissions
 
     @objc override public func checkPermissions(_ call: CAPPluginCall) {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
