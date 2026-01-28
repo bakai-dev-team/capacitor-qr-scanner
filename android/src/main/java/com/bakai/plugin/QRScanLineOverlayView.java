@@ -1,8 +1,8 @@
 package com.bakai.plugin;
 
 import android.animation.ValueAnimator;
+import android.annotation.SuppressLint;
 import android.content.Context;
-import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
@@ -15,13 +15,14 @@ import androidx.annotation.Nullable;
 
 public final class QRScanLineOverlayView extends View {
 
-    private static final int IOS_SYSTEM_BLUE = 0xFF007AFF;
-
     private ValueAnimator animator;
 
     private boolean isPaused = false;
 
+    // 90% ширины
     private float lineWidthFactor = 0.90f;
+
+    // top/bottom оставляем как было
     private float bottomFactor = 0.73f;
     private float statusBarFactor = 1.20f;
     private float extraTopDp = 100f;
@@ -29,28 +30,24 @@ public final class QRScanLineOverlayView extends View {
     private long durationMs = 2000;
 
     private final Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint glowPaint1 = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint glowPaint2 = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint trailPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private float density;
-    private float lineHeightPx;
 
+    // размеры
+    private float lineHeightPx; // толщина линии
+    private float trailLengthPx; // длина следа
+
+    // позиция
     private float currentY;
+    private float lastY = Float.NaN;
     private float pausedY = Float.NaN;
 
+    // геометрия
     private float leftX, rightX;
     private float yTop, yBottom;
 
-    // Кешируем чтобы не пересчитывать в onDraw
     private float halfLine;
-    private float glowExtra1;
-    private float glowExtra2;
-
-    // Большой радиус не нужен: достаточно половины ширины линии
-    private float cornerRadius;
-
-    // Если надо отключать blur на слабых устройствах:
-    private boolean enableGlow = true;
 
     public QRScanLineOverlayView(Context context) {
         super(context);
@@ -68,19 +65,26 @@ public final class QRScanLineOverlayView extends View {
         setFocusable(false);
 
         density = getResources().getDisplayMetrics().density;
-        lineHeightPx = 2f * density;
 
+        // Чуть толще и заметнее, но без мерцаний:
+        // делаем толщину в целых пикселях
+        float desired = 1.75f * density;
+        lineHeightPx = Math.max(1f, Math.round(desired)); // <= ключ к отсутствию "двойной" линии
+        halfLine = lineHeightPx / 2f;
+
+        // След длиннее
+        trailLengthPx = 130f * density;
+
+        // Линия — белая, без скругления
         linePaint.setStyle(Paint.Style.FILL);
-        glowPaint1.setStyle(Paint.Style.FILL);
-        glowPaint2.setStyle(Paint.Style.FILL);
+        linePaint.setColor(0xFFFFFFFF);
 
-        // BlurMaskFilter требует software layer, но включать его на весь View — дорого.
-        // Поэтому включаем только если glow реально нужен.
-        if (enableGlow) {
-            setLayerType(LAYER_TYPE_SOFTWARE, null);
-            glowPaint1.setMaskFilter(new BlurMaskFilter(2f * density, BlurMaskFilter.Blur.NORMAL));
-            glowPaint2.setMaskFilter(new BlurMaskFilter(4f * density, BlurMaskFilter.Blur.NORMAL));
-        }
+        // Важно: чтобы линия не "двоилось" — выключаем AA именно для линии
+        linePaint.setAntiAlias(false);
+
+        // След — мягкий градиент (AA можно оставить)
+        trailPaint.setStyle(Paint.Style.FILL);
+        trailPaint.setAntiAlias(true);
     }
 
     private int getStatusBarHeight() {
@@ -102,20 +106,6 @@ public final class QRScanLineOverlayView extends View {
         yTop = (sb * statusBarFactor) + (extraTopDp * density);
         yBottom = h * bottomFactor;
 
-        // Кеш для onDraw
-        halfLine = lineHeightPx / 2f;
-        glowExtra1 = lineHeightPx * 1.2f;
-        glowExtra2 = lineHeightPx * 2.2f;
-        cornerRadius = (rightX - leftX) * 0.5f; // достаточно, чтобы закруглить края
-
-        // Горизонтальные градиенты (по X). Y не важен.
-        linePaint.setShader(makeGradient(0x00000000, IOS_SYSTEM_BLUE, 0x00000000));
-        if (enableGlow) {
-            glowPaint1.setShader(makeGradient(0x00000000, 0xCC007AFF, 0x00000000));
-            glowPaint2.setShader(makeGradient(0x00000000, 0x88007AFF, 0x00000000));
-        }
-
-        // Если пауза — просто выставляем позицию и рисуем
         if (isPaused) {
             if (Float.isNaN(pausedY)) pausedY = yTop;
             currentY = clamp(pausedY, yTop, yBottom);
@@ -123,30 +113,58 @@ public final class QRScanLineOverlayView extends View {
             return;
         }
 
-        // Перезапуск с текущей позиции (если уже была), иначе с верха
-        float start = Float.isNaN(currentY) ? Float.NaN : currentY;
-        restartAnimatorFrom(start);
+        restartAnimatorFrom(Float.isNaN(currentY) ? Float.NaN : currentY);
     }
 
-    private Shader makeGradient(int c0, int c1, int c2) {
-        return new LinearGradient(leftX, 0f, rightX, 0f, new int[] { c0, c1, c2 }, new float[] { 0f, 0.5f, 1f }, Shader.TileMode.CLAMP);
-    }
-
+    @SuppressLint("DrawAllocation")
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-
         if (getWidth() == 0 || getHeight() == 0) return;
 
-        float top = currentY - halfLine;
-        float bottom = currentY + halfLine;
+        // направление движения линии
+        boolean goingDown = true;
+        if (!Float.isNaN(lastY)) goingDown = currentY >= lastY;
 
-        if (enableGlow) {
-            canvas.drawRoundRect(leftX, top - glowExtra2, rightX, bottom + glowExtra2, cornerRadius, cornerRadius, glowPaint2);
-            canvas.drawRoundRect(leftX, top - glowExtra1, rightX, bottom + glowExtra1, cornerRadius, cornerRadius, glowPaint1);
+        // --- SNAP к пиксельной сетке, чтобы линия не "двоилось"
+        // Для прямоугольника лучше всего рисовать по целым пикселям
+        float yLine = Math.round(currentY);
+
+        float lineTop = yLine - halfLine;
+        float lineBottom = yLine + halfLine;
+
+        // ----- 1) след (НЕ заходит под линию, чтобы не давал эффект второй полосы) -----
+        float trailTop, trailBottom;
+
+        if (goingDown) {
+            // линия вниз -> след сверху, но заканчивается ПЕРЕД линией
+            trailTop = yLine - trailLengthPx;
+            trailBottom = lineTop; // <-- важно: не до yLine
+        } else {
+            // линия вверх -> след снизу, но начинается ПОСЛЕ линии
+            trailTop = lineBottom; // <-- важно: не от yLine
+            trailBottom = yLine + trailLengthPx;
         }
 
-        canvas.drawRoundRect(leftX, top, rightX, bottom, cornerRadius, cornerRadius, linePaint);
+        trailTop = Math.max(trailTop, yTop);
+        trailBottom = Math.min(trailBottom, yBottom);
+
+        if (trailBottom > trailTop + 1f) {
+            int near = 0x55FFFFFF; // плотнее
+            int far = 0x00FFFFFF;
+
+            int[] colors = goingDown ? new int[] { far, near } : new int[] { near, far };
+
+            trailPaint.setShader(new LinearGradient(0f, trailTop, 0f, trailBottom, colors, new float[] { 0f, 1f }, Shader.TileMode.CLAMP));
+
+            canvas.drawRect(leftX, trailTop, rightX, trailBottom, trailPaint);
+        }
+
+        // ----- 2) сама линия (без скругления) -----
+        // linePaint без AA + yLine округлён => исчезает "раздвоение"
+        canvas.drawRect(leftX, lineTop, rightX, lineBottom, linePaint);
+
+        lastY = currentY;
     }
 
     private void restartAnimatorFrom(float startY) {
@@ -156,7 +174,10 @@ public final class QRScanLineOverlayView extends View {
         if (yBottom <= yTop + 20f) return;
 
         float begin = Float.isNaN(startY) ? yTop : clamp(startY, yTop, yBottom);
+
         currentY = begin;
+        lastY = Float.NaN;
+
         postInvalidateOnAnimation();
 
         animator = ValueAnimator.ofFloat(begin, yBottom);
@@ -183,8 +204,6 @@ public final class QRScanLineOverlayView extends View {
     public void start() {
         isPaused = false;
         pausedY = Float.NaN;
-
-        // Без рекурсии через post(this::start) — просто один отложенный старт
         post(() -> restartAnimatorFrom(Float.NaN));
     }
 
@@ -195,7 +214,7 @@ public final class QRScanLineOverlayView extends View {
 
         if (animator != null) {
             if (Build.VERSION.SDK_INT >= 19) animator.pause();
-            else animator.cancel(); // на старых — пересоздадим на resume
+            else animator.cancel();
         }
 
         postInvalidateOnAnimation();
@@ -230,12 +249,12 @@ public final class QRScanLineOverlayView extends View {
             isPaused = false;
             pausedY = Float.NaN;
             currentY = Float.NaN;
+            lastY = Float.NaN;
         }
     }
 
     @Override
     protected void onDetachedFromWindow() {
-        // чтобы не было утечек/лишней анимации в фоне
         stopInternal(true);
         super.onDetachedFromWindow();
     }
@@ -244,18 +263,22 @@ public final class QRScanLineOverlayView extends View {
         return Math.max(min, Math.min(max, v));
     }
 
-    // (опционально) быстрые сеттеры, если нужно менять параметры без пересоздания view:
+    // ---- опциональные сеттеры ----
+
     public void setDurationMs(long durationMs) {
         this.durationMs = Math.max(200L, durationMs);
         if (!isPaused) restartAnimatorFrom(currentY);
     }
 
-    public void setEnableGlow(boolean enable) {
-        if (this.enableGlow == enable) return;
-        this.enableGlow = enable;
-        // проще: пересоздать вью-параметры; если glow отключили — можно вернуть HW layer:
-        setLayerType(enableGlow ? LAYER_TYPE_SOFTWARE : LAYER_TYPE_HARDWARE, null);
-        requestLayout();
+    public void setTrailLengthDp(float dp) {
+        trailLengthPx = Math.max(10f, dp) * density;
+        invalidate();
+    }
+
+    public void setLineThicknessDp(float dp) {
+        float desired = Math.max(0.5f, dp) * density;
+        lineHeightPx = Math.max(1f, Math.round(desired)); // тоже в целых px
+        halfLine = lineHeightPx / 2f;
         invalidate();
     }
 }

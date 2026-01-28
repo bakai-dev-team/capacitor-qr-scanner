@@ -100,7 +100,7 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func pauseScan(_ call: CAPPluginCall) {
-        scanner.pause(previewHostView: previewView) // ✅ без звука, строго по последнему детекту
+        scanner.pause(previewHostView: previewView)
         call.resolve()
     }
 
@@ -108,6 +108,8 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         scanner.resume()
         call.resolve()
     }
+
+    // MARK: - Zoom
 
     @objc func setZoomRatio(_ call: CAPPluginCall) {
         let ratio = call.getFloat("zoomRatio") ?? 1
@@ -127,19 +129,24 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["zoomRatio": scanner.getMaxZoomRatio()])
     }
 
+    // MARK: - Torch (FIXED)
+
     @objc func enableTorch(_ call: CAPPluginCall) {
-        scanner.enableTorch()
-        call.resolve()
+        scanner.enableTorch {
+            call.resolve(["enabled": self.scanner.isTorchEnabled()])
+        }
     }
 
     @objc func disableTorch(_ call: CAPPluginCall) {
-        scanner.disableTorch()
-        call.resolve()
+        scanner.disableTorch {
+            call.resolve(["enabled": self.scanner.isTorchEnabled()])
+        }
     }
 
     @objc func toggleTorch(_ call: CAPPluginCall) {
-        scanner.toggleTorch()
-        call.resolve()
+        scanner.toggleTorch {
+            call.resolve(["enabled": self.scanner.isTorchEnabled()])
+        }
     }
 
     @objc func isTorchEnabled(_ call: CAPPluginCall) {
@@ -149,6 +156,8 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func isTorchAvailable(_ call: CAPPluginCall) {
         call.resolve(["available": scanner.isTorchAvailable()])
     }
+
+    // MARK: - Read barcodes from image
 
     @objc func readBarcodesFromImage(_ call: CAPPluginCall) {
 
@@ -171,6 +180,8 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Failed to read barcodes from image")
         }
     }
+
+    // MARK: - One-shot scan
 
     @objc func scan(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
@@ -199,6 +210,8 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    // MARK: - Permissions
+
     @objc override public func checkPermissions(_ call: CAPPluginCall) {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
 
@@ -224,6 +237,8 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
     }
+
+    // MARK: - Settings
 
     @objc func openSettings(_ call: CAPPluginCall) {
         guard let url = URL(string: UIApplication.openSettingsURLString) else {

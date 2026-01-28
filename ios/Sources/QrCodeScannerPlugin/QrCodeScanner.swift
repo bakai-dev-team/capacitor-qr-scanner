@@ -40,16 +40,19 @@ final class QrCodeScanner: NSObject {
     // =========================
     // DOUBLE BUFFER for freeze (STRICTLY last QR-detect)
     // =========================
-    // Два "последних успешных детекта"
     private var detectedImages: [UIImage?] = [nil, nil]
     private var detectedIndex: Int = 0
     private var hasDetectedAtLeastOnce: Bool = false
 
-    // Последний видеокадр (fallback если детекта ещё не было)
     private var lastFrameImage: UIImage?
 
-    // CIContext держим 1 раз
     private let ciContext = CIContext(options: nil)
+
+    // =========================
+    // TORCH STATE (FIX)
+    // =========================
+    // Держим своё согласованное состояние (обновляется только в sessionQueue)
+    private var torchEnabled: Bool = false
 
     // MARK: - Overlay
 
@@ -82,6 +85,9 @@ final class QrCodeScanner: NSObject {
         hasDetectedAtLeastOnce = false
         lastFrameImage = nil
 
+        // reset torch cached state
+        torchEnabled = false
+
         // init request once
         let req = VNDetectBarcodesRequest { [weak self] req, err in
             guard let self = self else { return }
@@ -95,7 +101,6 @@ final class QrCodeScanner: NSObject {
             let results = req.results as? [VNBarcodeObservation] ?? []
 
             // ✅ Привязка кадра строго к детекту:
-            // если найдено хотя бы 1 — сохраняем текущий lastFrameImage в double-buffer
             if !results.isEmpty, let img = self.lastFrameImage {
                 self.detectedIndex = 1 - self.detectedIndex
                 self.detectedImages[self.detectedIndex] = img
@@ -152,6 +157,20 @@ final class QrCodeScanner: NSObject {
             } catch {
                 DispatchQueue.main.async { [weak self] in self?.onError?(error.localizedDescription) }
                 return
+            }
+
+            // ✅ FORCE TORCH OFF AT START (по умолчанию false)
+            if device.hasTorch {
+                do {
+                    try device.lockForConfiguration()
+                    device.torchMode = .off
+                    device.unlockForConfiguration()
+                    self.torchEnabled = false
+                } catch {
+                    self.torchEnabled = false
+                }
+            } else {
+                self.torchEnabled = false
             }
 
             // video output (Vision)
@@ -258,6 +277,8 @@ final class QrCodeScanner: NSObject {
             self.lastFrameImage = nil
             self.hasDetectedAtLeastOnce = false
 
+            self.torchEnabled = false
+
             self.session.beginConfiguration()
             defer { self.session.commitConfiguration() }
 
@@ -321,43 +342,60 @@ final class QrCodeScanner: NSObject {
         paused = false
     }
 
-    // MARK: - Torch / Zoom
+    // MARK: - Torch / Zoom (FIXED)
 
     func isTorchAvailable() -> Bool { currentDevice?.hasTorch == true }
-    func isTorchEnabled() -> Bool { currentDevice?.torchMode == .on }
 
-    func enableTorch() {
+    /// Возвращаем кэш (согласованное состояние)
+    func isTorchEnabled() -> Bool { torchEnabled }
+
+    /// Включить torch и вызвать completion когда реально применилось
+    func enableTorch(completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
-            guard let self = self, let device = self.currentDevice, device.hasTorch else { return }
+            guard let self = self, let device = self.currentDevice, device.hasTorch else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
             do {
                 try device.lockForConfiguration()
-                device.torchMode = .on
+                try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
                 device.unlockForConfiguration()
-            } catch { DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") } }
+                self.torchEnabled = true
+            } catch {
+                self.torchEnabled = false
+                DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") }
+            }
+            DispatchQueue.main.async { completion?() }
         }
     }
 
-    func disableTorch() {
+    func disableTorch(completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
-            guard let self = self, let device = self.currentDevice, device.hasTorch else { return }
+            guard let self = self, let device = self.currentDevice, device.hasTorch else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
             do {
                 try device.lockForConfiguration()
                 device.torchMode = .off
                 device.unlockForConfiguration()
-            } catch { DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") } }
+                self.torchEnabled = false
+            } catch {
+                DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") }
+            }
+            DispatchQueue.main.async { completion?() }
         }
     }
 
-    func toggleTorch() {
-        sessionQueue.async { [weak self] in
-            guard let self = self, let device = self.currentDevice, device.hasTorch else { return }
-            do {
-                try device.lockForConfiguration()
-                device.torchMode = (device.torchMode == .on) ? .off : .on
-                device.unlockForConfiguration()
-            } catch { DispatchQueue.main.async { [weak self] in self?.onError?("Torch error") } }
+    func toggleTorch(completion: (() -> Void)? = nil) {
+        if torchEnabled {
+            disableTorch(completion: completion)
+        } else {
+            enableTorch(completion: completion)
         }
     }
+
+    // MARK: - Zoom
 
     func setZoom(_ ratio: CGFloat) {
         sessionQueue.async { [weak self] in
@@ -385,8 +423,7 @@ final class QrCodeScanner: NSObject {
         let ci = CIImage(cvPixelBuffer: pb)
         guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return nil }
 
-        // ✅ ВАЖНО: .up — иначе получишь +90° относительно previewLayer (portrait)
-        // Зеркалирование фронта уже делает previewLayer, а freeze нам нужен "как на экране"
+        // ✅ .up — иначе получишь +90° относительно previewLayer (portrait)
         return UIImage(cgImage: cg, scale: UIScreen.main.scale, orientation: .up)
     }
 }
