@@ -17,6 +17,7 @@ final class QRScanOverlayView: UIView {
     var trailAlphaNear: CGFloat = 85.0 / 255.0
     var trailAlphaMid: CGFloat = 42.0 / 255.0
     var trailLength: CGFloat = 130
+    var turnBlendLength: CGFloat = 36
 
     var statusBarOffsetFactor: CGFloat = 0.10
 
@@ -145,7 +146,10 @@ final class QRScanOverlayView: UIView {
         let newY = CGFloat(top + (bottom - top) * progress)
 
         if let last = lastY {
-            goingDown = newY >= last
+            let delta = newY - last
+            if abs(delta) > (1.0 / UIScreen.main.scale) {
+                goingDown = delta > 0
+            }
         } else {
             goingDown = true
         }
@@ -171,17 +175,77 @@ final class QRScanOverlayView: UIView {
         let lineTop = y - halfLine
         let lineBottom = y + halfLine
 
-        // Тень: НЕ заходит под линию (иначе кажется что линия “двойная”)
+        // Тень: плавный crossfade на разворотах, чтобы не было резкого "переворота"
+        let scanTop = yTop()
+        let scanBottom = yBottom()
+        let travel = max(1.0, scanBottom - scanTop)
+        let blendWindow = max(1.0 / UIScreen.main.scale, min(turnBlendLength, travel * 0.25))
+        let blendToNext = goingDown
+            ? clamp01((blendWindow - (scanBottom - y)) / blendWindow)
+            : clamp01((blendWindow - (y - scanTop)) / blendWindow)
+
+        let primaryAlpha = 1.0 - blendToNext
+        let secondaryAlpha = blendToNext
+        let position01 = clamp01((y - scanTop) / travel)
+        let shimmer = 0.5 + 0.5 * sin((CACurrentMediaTime() * 4.2) + (Double(position01) * .pi * 2.0))
+        let trailAlphaPulse = CGFloat(0.82 + (0.28 * shimmer))
+        let trailLengthScale = CGFloat(0.88 + (0.22 * shimmer))
+        let gradientShift = CGFloat(0.08 * (shimmer - 0.5))
+
         if goingDown {
-            let trailBottom = lineTop
-            let trailTop = max(trailBottom - trailLength, bounds.minY)
-            let h = max(1.0 / UIScreen.main.scale, trailBottom - trailTop)
-            drawTrail(ctx: ctx, rect: CGRect(x: x, y: trailTop, width: width, height: h), goingDown: true)
+            drawTrailForDirection(
+                ctx: ctx,
+                x: x,
+                width: width,
+                lineTop: lineTop,
+                lineBottom: lineBottom,
+                goingDown: true,
+                scanTop: scanTop,
+                scanBottom: scanBottom,
+                alphaMultiplier: primaryAlpha * trailAlphaPulse,
+                lengthScale: trailLengthScale,
+                gradientShift: gradientShift
+            )
+            drawTrailForDirection(
+                ctx: ctx,
+                x: x,
+                width: width,
+                lineTop: lineTop,
+                lineBottom: lineBottom,
+                goingDown: false,
+                scanTop: scanTop,
+                scanBottom: scanBottom,
+                alphaMultiplier: secondaryAlpha * trailAlphaPulse,
+                lengthScale: trailLengthScale,
+                gradientShift: gradientShift
+            )
         } else {
-            let trailTop = lineBottom
-            let trailBottom = min(trailTop + trailLength, bounds.maxY)
-            let h = max(1.0 / UIScreen.main.scale, trailBottom - trailTop)
-            drawTrail(ctx: ctx, rect: CGRect(x: x, y: trailTop, width: width, height: h), goingDown: false)
+            drawTrailForDirection(
+                ctx: ctx,
+                x: x,
+                width: width,
+                lineTop: lineTop,
+                lineBottom: lineBottom,
+                goingDown: false,
+                scanTop: scanTop,
+                scanBottom: scanBottom,
+                alphaMultiplier: primaryAlpha * trailAlphaPulse,
+                lengthScale: trailLengthScale,
+                gradientShift: gradientShift
+            )
+            drawTrailForDirection(
+                ctx: ctx,
+                x: x,
+                width: width,
+                lineTop: lineTop,
+                lineBottom: lineBottom,
+                goingDown: true,
+                scanTop: scanTop,
+                scanBottom: scanBottom,
+                alphaMultiplier: secondaryAlpha * trailAlphaPulse,
+                lengthScale: trailLengthScale,
+                gradientShift: gradientShift
+            )
         }
 
         // Линия
@@ -189,22 +253,72 @@ final class QRScanOverlayView: UIView {
         ctx.fill(CGRect(x: x, y: lineTop, width: width, height: lineHeight))
     }
 
-    private func drawTrail(ctx: CGContext, rect: CGRect, goingDown: Bool) {
+    private func drawTrailForDirection(
+        ctx: CGContext,
+        x: CGFloat,
+        width: CGFloat,
+        lineTop: CGFloat,
+        lineBottom: CGFloat,
+        goingDown: Bool,
+        scanTop: CGFloat,
+        scanBottom: CGFloat,
+        alphaMultiplier: CGFloat,
+        lengthScale: CGFloat,
+        gradientShift: CGFloat
+    ) {
+        let k = clamp01(alphaMultiplier)
+        if k <= 0.01 { return }
+
+        let effectiveTrailLength = trailLength * clamp(lengthScale, minValue: 0.75, maxValue: 1.3)
+        let trailTop: CGFloat
+        let trailBottom: CGFloat
+
+        if goingDown {
+            trailBottom = lineTop
+            trailTop = max(trailBottom - effectiveTrailLength, scanTop)
+        } else {
+            trailTop = lineBottom
+            trailBottom = min(trailTop + effectiveTrailLength, scanBottom)
+        }
+
+        let h = trailBottom - trailTop
+        if h <= (1.0 / UIScreen.main.scale) { return }
+
+        drawTrail(
+            ctx: ctx,
+            rect: CGRect(x: x, y: trailTop, width: width, height: h),
+            goingDown: goingDown,
+            alphaMultiplier: k,
+            gradientShift: gradientShift
+        )
+    }
+
+    private func drawTrail(
+        ctx: CGContext,
+        rect: CGRect,
+        goingDown: Bool,
+        alphaMultiplier: CGFloat,
+        gradientShift: CGFloat
+    ) {
         if rect.height <= 0.5 { return }
 
+        let k = clamp01(alphaMultiplier)
         let far  = lineColor.withAlphaComponent(0.0).cgColor
-        let mid  = lineColor.withAlphaComponent(trailAlphaMid).cgColor
-        let near = lineColor.withAlphaComponent(trailAlphaNear).cgColor
+        let mid  = lineColor.withAlphaComponent(trailAlphaMid * k * 0.9).cgColor
+        let near = lineColor.withAlphaComponent(trailAlphaNear * k).cgColor
 
         let colors: [CGColor]
         let locations: [CGFloat]
+        let midLocation = goingDown
+            ? clamp(0.68 + gradientShift, minValue: 0.2, maxValue: 0.8)
+            : clamp(0.32 - gradientShift, minValue: 0.2, maxValue: 0.8)
 
         if goingDown {
             colors = [far, mid, near]
-            locations = [0.0, 0.65, 1.0]
+            locations = [0.0, midLocation, 1.0]
         } else {
             colors = [near, mid, far]
-            locations = [0.0, 0.35, 1.0]
+            locations = [0.0, midLocation, 1.0]
         }
 
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
@@ -220,6 +334,14 @@ final class QRScanOverlayView: UIView {
         ctx.drawLinearGradient(gradient, start: start, end: end, options: [])
 
         ctx.restoreGState()
+    }
+
+    private func clamp01(_ value: CGFloat) -> CGFloat {
+        return min(1.0, max(0.0, value))
+    }
+
+    private func clamp(_ value: CGFloat, minValue: CGFloat, maxValue: CGFloat) -> CGFloat {
+        return min(maxValue, max(minValue, value))
     }
 
     // MARK: - Android-like bezier easing solver

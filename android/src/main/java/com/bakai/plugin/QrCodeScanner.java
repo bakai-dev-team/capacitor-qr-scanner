@@ -113,7 +113,10 @@ public class QrCodeScanner {
     public QrCodeScanner(Context context) {
         this.context = context.getApplicationContext();
 
-        BarcodeScannerOptions options = new BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).enableAllPotentialBarcodes().build();
+        BarcodeScannerOptions options = new BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAllPotentialBarcodes()
+            .build();
 
         scanner = BarcodeScanning.getClient(options);
 

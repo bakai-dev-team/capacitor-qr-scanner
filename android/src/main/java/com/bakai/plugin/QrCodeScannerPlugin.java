@@ -431,12 +431,7 @@ public class QrCodeScannerPlugin extends Plugin {
             float contrast = 1.55f;
             float translate = (-0.5f * contrast + 0.5f) * 255f;
             ColorMatrix contrastMatrix = new ColorMatrix(
-                new float[] {
-                    contrast, 0, 0, 0, translate,
-                    0, contrast, 0, 0, translate,
-                    0, 0, contrast, 0, translate,
-                    0, 0, 0, 1, 0
-                }
+                new float[] { contrast, 0, 0, 0, translate, 0, contrast, 0, 0, translate, 0, 0, contrast, 0, translate, 0, 0, 0, 1, 0 }
             );
             matrix.postConcat(contrastMatrix);
 
