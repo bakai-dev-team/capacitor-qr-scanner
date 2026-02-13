@@ -20,6 +20,7 @@ final class QRScanOverlayView: UIView {
     var turnBlendLength: CGFloat = 36
 
     var statusBarOffsetFactor: CGFloat = 0.10
+    var lineVerticalOffsetCm: CGFloat = 1.0
 
     // Время как на Android (durationMs)
     var durationMs: Double = 2000
@@ -398,7 +399,7 @@ final class QRScanOverlayView: UIView {
 
     private func yTop() -> CGFloat {
         let statusBarHeight = window?.windowScene?.statusBarManager?.statusBarFrame.height ?? 0
-        return statusBarHeight * (3.0 + statusBarOffsetFactor)
+        return (statusBarHeight * (3.0 + statusBarOffsetFactor)) + lineVerticalOffsetPoints()
     }
 
     private func yBottom() -> CGFloat {
@@ -408,5 +409,9 @@ final class QRScanOverlayView: UIView {
     private func snapToPixel(_ y: CGFloat) -> CGFloat {
         let scale = UIScreen.main.scale
         return round(y * scale) / scale
+    }
+
+    private func lineVerticalOffsetPoints() -> CGFloat {
+        return lineVerticalOffsetCm * (72.0 / 2.54)
     }
 }
