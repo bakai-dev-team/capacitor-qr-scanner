@@ -38,6 +38,9 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     private let scanner = QrCodeScanner()
     private let ciContext = CIContext(options: nil)
     private var previewView: UIView?
+    private var originalWebViewIsOpaque: Bool?
+    private var originalWebViewBackgroundColor: UIColor?
+    private var originalWebViewScrollBackgroundColor: UIColor?
 
     @objc func startScan(_ call: CAPPluginCall) {
         let options = mergedOptions(from: call)
@@ -58,9 +61,17 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
 
+            if self.originalWebViewIsOpaque == nil {
+                self.originalWebViewIsOpaque = webView.isOpaque
+                self.originalWebViewBackgroundColor = webView.backgroundColor
+                self.originalWebViewScrollBackgroundColor = webView.scrollView.backgroundColor
+            }
+
             webView.isOpaque = false
             webView.backgroundColor = .clear
             webView.scrollView.backgroundColor = .clear
+
+            self.previewView?.removeFromSuperview()
 
             let pv = UIView(frame: container.bounds)
             pv.backgroundColor = .clear
@@ -75,12 +86,16 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             self.scanner.onResult = { [weak self] barcodes in
                 guard let self = self else { return }
                 if barcodes.isEmpty { return }
-                self.notifyListeners("barcodesScanned", data: BarcodeMapper.toJS(barcodes))
+                DispatchQueue.main.async {
+                    self.notifyListeners("barcodesScanned", data: BarcodeMapper.toJS(barcodes))
+                }
             }
 
             self.scanner.onError = { [weak self] message in
                 guard let self = self else { return }
-                self.notifyListeners("scanError", data: ["message": message])
+                DispatchQueue.main.async {
+                    self.notifyListeners("scanError", data: ["message": message])
+                }
             }
 
             do {
@@ -93,10 +108,27 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func stopScan(_ call: CAPPluginCall) {
-        scanner.stop()
-        DispatchQueue.main.async {
+        scanner.stop { [weak self] in
+            guard let self = self else {
+                call.resolve()
+                return
+            }
+
             self.previewView?.removeFromSuperview()
             self.previewView = nil
+
+            if let webView = self.bridge?.webView {
+                if let originalOpaque = self.originalWebViewIsOpaque {
+                    webView.isOpaque = originalOpaque
+                }
+                webView.backgroundColor = self.originalWebViewBackgroundColor
+                webView.scrollView.backgroundColor = self.originalWebViewScrollBackgroundColor
+            }
+
+            self.originalWebViewIsOpaque = nil
+            self.originalWebViewBackgroundColor = nil
+            self.originalWebViewScrollBackgroundColor = nil
+
             call.resolve()
         }
     }
@@ -228,15 +260,19 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
 
             self.scanner.onResult = { barcodes in
                 if barcodes.isEmpty { return }
-                call.resolve(BarcodeMapper.toJS(barcodes))
-                self.scanner.stop()
-                view.removeFromSuperview()
+                DispatchQueue.main.async {
+                    call.resolve(BarcodeMapper.toJS(barcodes))
+                    self.scanner.stop()
+                    view.removeFromSuperview()
+                }
             }
 
             self.scanner.onError = { message in
-                call.reject(message)
-                self.scanner.stop()
-                view.removeFromSuperview()
+                DispatchQueue.main.async {
+                    call.reject(message)
+                    self.scanner.stop()
+                    view.removeFromSuperview()
+                }
             }
 
             do {

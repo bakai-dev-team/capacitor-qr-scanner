@@ -220,30 +220,26 @@ final class QrCodeScanner: NSObject {
 
     // MARK: - Stop
 
-    func stop() {
+    func stop(completion: (() -> Void)? = nil) {
         paused = true
         startStopToken = UUID()
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-
-            self.previewLayer?.removeFromSuperlayer()
-            self.previewLayer = nil
-
-            self.overlay?.stopAnimating()
-            self.overlay?.removeFromSuperview()
-            self.overlay = nil
-
-            self.freezeView?.removeFromSuperview()
-            self.freezeView = nil
-        }
-
         sessionQueue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else {
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
 
+            // Stop frame callbacks first to avoid race with teardown.
+            self.videoOutput?.setSampleBufferDelegate(nil, queue: nil)
             self.videoConnection?.isEnabled = false
             self.videoConnection = nil
-            self.videoOutput = nil
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
 
             self.detectRequest = nil
             self.isProcessingFrame = false
@@ -261,7 +257,27 @@ final class QrCodeScanner: NSObject {
             for output in self.session.outputs { self.session.removeOutput(output) }
             for input in self.session.inputs { self.session.removeInput(input) }
 
+            self.videoOutput = nil
             self.currentDevice = nil
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else {
+                    completion?()
+                    return
+                }
+
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+
+                self.overlay?.stopAnimating()
+                self.overlay?.removeFromSuperview()
+                self.overlay = nil
+
+                self.freezeView?.removeFromSuperview()
+                self.freezeView = nil
+
+                completion?()
+            }
         }
     }
 
