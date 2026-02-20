@@ -1,6 +1,6 @@
 {
   "name": "capacitor-qr-scanner",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "For scanning qr",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
