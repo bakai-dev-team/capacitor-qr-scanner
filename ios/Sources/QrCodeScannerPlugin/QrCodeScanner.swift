@@ -14,6 +14,7 @@ final class QrCodeScanner: NSObject {
     private var overlay: QRScanOverlayView?
 
     private var paused = false
+    private var isStopping = false
     private var currentDevice: AVCaptureDevice?
     private var currentPosition: AVCaptureDevice.Position = .back
 
@@ -81,6 +82,7 @@ final class QrCodeScanner: NSObject {
         startStopToken = token
 
         paused = false
+        isStopping = false
 
         // reset perf state
         isProcessingFrame = false
@@ -221,7 +223,6 @@ final class QrCodeScanner: NSObject {
     // MARK: - Stop
 
     func stop(completion: (() -> Void)? = nil) {
-        paused = true
         startStopToken = UUID()
 
         sessionQueue.async { [weak self] in
@@ -232,24 +233,40 @@ final class QrCodeScanner: NSObject {
                 return
             }
 
-            // Stop frame callbacks first to avoid race with teardown.
+            if self.isStopping {
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
+
+            self.isStopping = true
+            self.paused = true
+
+            // Stop frame callbacks first, then drain the video queue so teardown
+            // never races with an in-flight Vision request.
             self.videoOutput?.setSampleBufferDelegate(nil, queue: nil)
             self.videoConnection?.isEnabled = false
-            self.videoConnection = nil
+            self.videoQueue.sync {}
 
-            if self.session.isRunning {
-                self.session.stopRunning()
-            }
+            self.onResult = nil
+            self.onError = nil
 
             self.detectRequest = nil
             self.isProcessingFrame = false
             self.consecutiveDecodeMisses = 0
 
             self.detectedImages = [nil, nil]
+            self.detectedIndex = 0
             self.lastFrameImage = nil
             self.hasDetectedAtLeastOnce = false
 
+            self.manualZoomLocked = false
             self.torchEnabled = false
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
 
             self.session.beginConfiguration()
             defer { self.session.commitConfiguration() }
@@ -258,7 +275,9 @@ final class QrCodeScanner: NSObject {
             for input in self.session.inputs { self.session.removeInput(input) }
 
             self.videoOutput = nil
+            self.videoConnection = nil
             self.currentDevice = nil
+            self.isStopping = false
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else {

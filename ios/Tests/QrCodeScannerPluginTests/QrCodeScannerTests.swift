@@ -1,15 +1,30 @@
 import XCTest
 @testable import QrCodeScannerPlugin
 
-class QrCodeScannerTests: XCTestCase {
-    func testEcho() {
-        // This is an example of a functional test case for a plugin.
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+final class QrCodeScannerTests: XCTestCase {
+    func testStopWithoutStartInvokesCompletion() {
+        let scanner = QrCodeScanner()
+        let completion = expectation(description: "stop completion")
 
-        let implementation = QrCodeScanner()
-        let value = "Hello, World!"
-        let result = implementation.echo(value)
+        scanner.stop {
+            completion.fulfill()
+        }
 
-        XCTAssertEqual(value, result)
+        wait(for: [completion], timeout: 1.0)
+    }
+
+    func testStopIsIdempotent() {
+        let scanner = QrCodeScanner()
+        let firstCompletion = expectation(description: "first stop completion")
+        let secondCompletion = expectation(description: "second stop completion")
+
+        scanner.stop {
+            firstCompletion.fulfill()
+        }
+        scanner.stop {
+            secondCompletion.fulfill()
+        }
+
+        wait(for: [firstCompletion, secondCompletion], timeout: 1.0)
     }
 }
