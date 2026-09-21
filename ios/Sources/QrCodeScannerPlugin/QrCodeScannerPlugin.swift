@@ -98,6 +98,10 @@ public class QrCodeScannerPlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
 
+            self.scanner.onPreviewReady = { [weak self] in
+                self?.notifyListeners("previewReady", data: [:])
+            }
+
             do {
                 try self.scanner.start(previewView: pv, lens: lens, resolution: resolution)
                 call.resolve()

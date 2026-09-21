@@ -29,6 +29,16 @@ final class QrCodeScanner: NSObject {
 
     var onResult: (([VNBarcodeObservation]) -> Void)?
     var onError: ((String) -> Void)?
+    var onPreviewReady: (() -> Void)?
+    private var firstFrameReceived = false
+    private var previewReadyDelivered = false
+    private var firstFrameNotified = false // Accessed only on videoQueue.
+
+    private func reportPreviewReadyIfPossible() {
+        guard firstFrameReceived, previewLayer != nil, !previewReadyDelivered else { return }
+        previewReadyDelivered = true
+        onPreviewReady?()
+    }
 
     // =========================
     // OPT: Vision reuse + throttle + no parallel
@@ -80,6 +90,10 @@ final class QrCodeScanner: NSObject {
     func start(previewView: UIView, lens: String, resolution: Int) throws {
         let token = UUID()
         startStopToken = token
+
+        firstFrameReceived = false
+        previewReadyDelivered = false
+        videoQueue.async { [weak self] in self?.firstFrameNotified = false }
 
         paused = false
         isStopping = false
@@ -207,6 +221,7 @@ final class QrCodeScanner: NSObject {
                     self.previewLayer = layer
 
                     self.attachOverlay(to: previewView)
+                    self.reportPreviewReadyIfPossible()
                 }
             }
         }
@@ -251,6 +266,7 @@ final class QrCodeScanner: NSObject {
 
             self.onResult = nil
             self.onError = nil
+            self.onPreviewReady = nil
 
             self.detectRequest = nil
             self.isProcessingFrame = false
@@ -287,6 +303,8 @@ final class QrCodeScanner: NSObject {
 
                 self.previewLayer?.removeFromSuperlayer()
                 self.previewLayer = nil
+                self.firstFrameReceived = false
+                self.previewReadyDelivered = false
 
                 self.overlay?.stopAnimating()
                 self.overlay?.removeFromSuperview()
@@ -573,6 +591,15 @@ extension QrCodeScanner: AVCaptureVideoDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
 
         if paused { return }
+        if !firstFrameNotified {
+            firstFrameNotified = true
+            let token = startStopToken
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.startStopToken == token else { return }
+                self.firstFrameReceived = true
+                self.reportPreviewReadyIfPossible()
+            }
+        }
         guard let request = detectRequest else { return }
 
         let now = CFAbsoluteTimeGetCurrent()

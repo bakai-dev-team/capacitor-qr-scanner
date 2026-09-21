@@ -11,10 +11,13 @@ import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.ViewParent;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -59,6 +62,11 @@ public class QrCodeScannerPlugin extends Plugin {
         if (getBridge() != null && getBridge().getWebView() != null) {
             getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
         }
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                ProcessCameraProvider.getInstance(getContext());
+            } catch (Exception ignored) {}
+        }, 2000);
     }
 
     @PluginMethod
@@ -99,6 +107,13 @@ public class QrCodeScannerPlugin extends Plugin {
                 previewView.setClickable(false);
                 previewView.setFocusable(false);
                 cameraContainer.addView(previewView);
+
+                final PreviewView currentPreview = previewView;
+                currentPreview.getPreviewStreamState().observe(getActivity(), state -> {
+                    if (previewView == currentPreview && state == PreviewView.StreamState.STREAMING) {
+                        notifyListeners("previewReady", new JSObject());
+                    }
+                });
 
                 // overlay scanline
                 scanOverlay = new QRScanLineOverlayView(getContext());
