@@ -36,6 +36,7 @@ npx cap sync
 * [`requestPermissions()`](#requestpermissions)
 * [`addListener('barcodesScanned', ...)`](#addlistenerbarcodesscanned-)
 * [`addListener('scanError', ...)`](#addlistenerscanerror-)
+* [`addListener('previewReady', ...)`](#addlistenerpreviewready-)
 * [`addListener('googleBarcodeScannerModuleInstallProgress', ...)`](#addlistenergooglebarcodescannermoduleinstallprogress-)
 * [`removeAllListeners()`](#removealllisteners)
 * [Interfaces](#interfaces)
@@ -300,6 +301,22 @@ addListener(eventName: 'scanError', listenerFunc: (event: ScanErrorEvent) => voi
 | ------------------ | ----------------------------------------------------------------------------- |
 | **`eventName`**    | <code>'scanError'</code>                                                      |
 | **`listenerFunc`** | <code>(event: <a href="#scanerrorevent">ScanErrorEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
+### addListener('previewReady', ...)
+
+```typescript
+addListener(eventName: 'previewReady', listenerFunc: () => void) => Promise<PluginListenerHandle>
+```
+
+| Param              | Type                        |
+| ------------------ | --------------------------- |
+| **`eventName`**    | <code>'previewReady'</code> |
+| **`listenerFunc`** | <code>() =&gt; void</code>  |
 
 **Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
 
