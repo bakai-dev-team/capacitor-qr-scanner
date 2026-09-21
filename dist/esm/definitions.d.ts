@@ -23,6 +23,7 @@ export interface QrCodeScannerPlugin {
     requestPermissions(): Promise<PermissionStatus>;
     addListener(eventName: 'barcodesScanned', listenerFunc: (event: BarcodesScannedEvent) => void): Promise<PluginListenerHandle>;
     addListener(eventName: 'scanError', listenerFunc: (event: ScanErrorEvent) => void): Promise<PluginListenerHandle>;
+    addListener(eventName: 'previewReady', listenerFunc: () => void): Promise<PluginListenerHandle>;
     addListener(eventName: 'googleBarcodeScannerModuleInstallProgress', listenerFunc: (event: GoogleBarcodeScannerModuleInstallProgressEvent) => void): Promise<PluginListenerHandle>;
     removeAllListeners(): Promise<void>;
 }
